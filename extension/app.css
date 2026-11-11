@@ -1,0 +1,31 @@
+:root{--bg:#f4f6f9;--card:#fff;--ink:#16202c;--muted:#5b6878;--line:#dfe4ea;--brand:#1f5fbf;--brand-ink:#fff;--ok:#1b7a43;--bad:#b3261e;--warn:#8a5a00;--chip:#eef2f7}
+@media (prefers-color-scheme:dark){:root{--bg:#11161d;--card:#18202a;--ink:#e7ecf2;--muted:#9aa6b4;--line:#2a3542;--brand:#5b9bf0;--brand-ink:#0b1320;--ok:#5ccf8d;--bad:#ff8a80;--warn:#f2c066;--chip:#222c38}}
+*{box-sizing:border-box}
+body{margin:0;background:var(--bg);color:var(--ink);font:15px/1.55 -apple-system,BlinkMacSystemFont,"Apple SD Gothic Neo","Malgun Gothic",sans-serif}
+main{max-width:760px;margin:0 auto;padding:32px 16px 64px}
+.eyebrow{margin:0;color:var(--brand);font-weight:600;font-size:13px}
+h1{margin:4px 0 6px;font-size:28px}
+.lead{margin:0 0 24px;color:var(--muted)}
+.card{background:var(--card);border:1px solid var(--line);border-radius:12px;padding:20px;margin-bottom:16px}
+h2{margin:0 0 14px;font-size:17px}
+label{display:block;font-weight:600;margin:12px 0 6px}
+input,select{width:100%;padding:10px 12px;border:1px solid var(--line);border-radius:8px;background:var(--card);color:var(--ink);font:inherit}
+.row{display:grid;grid-template-columns:1fr 1fr;gap:12px}
+.hint{margin:6px 0 0;color:var(--muted);font-size:13px}
+.notice{margin:16px 0 0;padding:10px 12px;border-radius:8px;background:var(--chip);color:var(--muted);font-size:13px}
+.actions{display:flex;gap:8px;flex-wrap:wrap;margin-top:16px}
+button{padding:10px 16px;border-radius:8px;border:1px solid var(--line);background:var(--card);color:var(--ink);font:inherit;font-weight:600;cursor:pointer}
+button.primary{background:var(--brand);border-color:var(--brand);color:var(--brand-ink)}
+button:disabled{opacity:.5;cursor:not-allowed}
+.message{margin:12px 0 0;padding:10px 12px;border-radius:8px;background:var(--chip)}
+.message.error{color:var(--bad)}
+.summary{margin:0 0 10px;font-weight:600}
+.bar{height:8px;border-radius:4px;background:var(--chip);overflow:hidden}
+.bar>div{height:100%;width:0;background:var(--brand);transition:width .3s}
+table{width:100%;border-collapse:collapse;margin-top:16px;font-size:14px}
+th,td{text-align:left;padding:8px 6px;border-bottom:1px solid var(--line)}
+th{color:var(--muted);font-weight:600}
+th:nth-child(-n+3),td:nth-child(-n+3){white-space:nowrap}
+.s-success{color:var(--ok)}.s-failed{color:var(--bad)}.s-pending{color:var(--muted)}.s-running{color:var(--warn)}
+details{margin-top:16px}summary{cursor:pointer;font-weight:600}
+@media (max-width:480px){.row{grid-template-columns:1fr}}
