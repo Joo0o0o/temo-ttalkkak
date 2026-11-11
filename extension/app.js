@@ -39,7 +39,10 @@ const MESSAGES = {
 };
 const msg = code => MESSAGES[code] || MESSAGES.REPORT_FAILED;
 const $ = id => document.getElementById(id);
-const job = globalThis.__moireJob = {running: false, stop: false, outcomes: [], issues: [], month: null, scope: null, zipUrl: null, members: 0, scanned: 0};
+const job = globalThis.__moireJob = {running: false, stop: false, outcomes: [], issues: [], month: null, scope: null, zipUrl: null, members: 0, scanned: 0, log: [], round: 0};
+const REPORT_MIN_FAILED = 3;
+const REPORT_CHAT = 'https://open.kakao.com/o/sqqaBBWi';
+const logEvent = (type, data = {}) => job.log.push({t: new Date().toISOString(), round: job.round, type, ...data});
 
 function init() {
   const now = new Date(), y = now.getFullYear(), prev = new Date(y, now.getMonth() - 1, 1);
@@ -51,13 +54,14 @@ function init() {
   $('stop').addEventListener('click', () => { job.stop = true; say('현재 검사를 마치면 중지합니다.'); });
   $('retry').addEventListener('click', retry);
   $('download').addEventListener('click', () => save(false));
+  $('report').addEventListener('click', () => saveErrorLog().catch(() => say('오류 기록 파일을 저장하지 못했습니다.', true)));
 }
 
 function say(text, error = false) { const m = $('message'); m.hidden = !text; m.textContent = text || ''; m.classList.toggle('error', error); }
 function busy(on) {
   job.running = on;
   for (const id of ['start', 'address', 'year', 'month']) $(id).disabled = on;
-  $('stop').hidden = !on; $('retry').disabled = on; $('download').disabled = on;
+  $('stop').hidden = !on; $('retry').disabled = on; $('download').disabled = on; $('report').disabled = on;
 }
 
 function render(stageText = '') {
@@ -85,6 +89,9 @@ function render(stageText = '') {
   const hasFailed = failed > 0;
   $('retry').hidden = !hasFailed || job.running;
   $('download').hidden = !done || job.running;
+  // Only offer the error-log file once 3+ reports failed; fewer failures are usually transient and retry fixes them.
+  const showReport = failed >= REPORT_MIN_FAILED && !job.running;
+  $('report').hidden = !showReport; $('report-help').hidden = !showReport;
 }
 
 async function readTokens(ep) {
@@ -110,8 +117,9 @@ async function start() {
   if (!granted) { say(msg('PERMISSION_DENIED'), true); return; }
   await chrome.storage.local.set({address: ep.frontend});
   $('address').value = ep.frontend;
-  Object.assign(job, {stop: false, outcomes: [], issues: [], members: 0, scanned: 0, ep,
+  Object.assign(job, {stop: false, outcomes: [], issues: [], members: 0, scanned: 0, ep, log: [], round: 1,
     month: `${year}-${String(month).padStart(2, '0')}`, scope: monthRange(year, month)});
+  logEvent('start', {month: job.month});
   if (job.zipUrl) { URL.revokeObjectURL(job.zipUrl); job.zipUrl = null; }
   $('saved').hidden = true;
   busy(true); say('');
@@ -131,10 +139,12 @@ async function start() {
       render('환자 확인 중');
     }
     rows.sort((a, b) => a.createdAt - b.createdAt || a.name.localeCompare(b.name, 'ko'));
+    logEvent('catalogue', {members: job.members, reports: rows.length, issues: job.issues.map(i => i.code)});
     job.outcomes = rows.map(row => ({row, status: 'pending', code: null}));
     client.tokens = null;
     await runReports(ep);
   } catch (e) {
+    logEvent('aborted', {code: e.code || 'REPORT_FAILED', detail: e.code ? undefined : String(e?.message || e).slice(0, 200)});
     say(msg(e.code || 'REPORT_FAILED'), true);
   } finally { busy(false); render(); }
 }
@@ -144,9 +154,13 @@ async function retry() {
   const granted = await chrome.permissions.request({origins: originPatterns(job.ep.frontend)}).catch(() => false);
   if (!granted) { say(msg('PERMISSION_DENIED'), true); return; }
   for (const o of job.outcomes) if (o.status === 'failed') Object.assign(o, {status: 'pending', code: null});
-  job.stop = false; busy(true); say('');
+  job.stop = false; job.round++; busy(true); say('');
+  logEvent('retry', {reports: job.outcomes.filter(o => o.status === 'pending').length});
   try { await runReports(job.ep); }
-  catch (e) { say(msg(e.code || 'REPORT_FAILED'), true); }
+  catch (e) {
+    logEvent('aborted', {code: e.code || 'REPORT_FAILED', detail: e.code ? undefined : String(e?.message || e).slice(0, 200)});
+    say(msg(e.code || 'REPORT_FAILED'), true);
+  }
   finally { busy(false); render(); }
 }
 
@@ -170,8 +184,10 @@ async function runReports(ep) {
       try {
         const {bytes, facts} = await renderReport(cfg, {windowId: win.id});
         Object.assign(o, {status: 'success', code: null, pdf: bytes, facts});
+        logEvent('success', {no: job.outcomes.indexOf(o) + 1, facts});
       } catch (e) {
         Object.assign(o, {status: 'failed', code: e.code || 'REPORT_FAILED', facts: e.facts});
+        logEvent('failed', {no: job.outcomes.indexOf(o) + 1, code: o.code, facts: e.facts});
         if (e.code === 'AUTH_ENDED') { job.stop = true; say(msg('AUTH_ENDED'), true); }
       }
       render();
@@ -180,7 +196,10 @@ async function runReports(ep) {
     try { await chrome.windows.remove(win.id); } catch {}
     void blank;
   }
-  for (const o of job.outcomes) if (o.status === 'pending' || o.status === 'running') Object.assign(o, {status: 'failed', code: 'STOPPED'});
+  for (const o of job.outcomes) if (o.status === 'pending' || o.status === 'running') {
+    Object.assign(o, {status: 'failed', code: 'STOPPED'});
+    logEvent('failed', {no: job.outcomes.indexOf(o) + 1, code: 'STOPPED'});
+  }
   render();
   if (job.outcomes.some(o => o.status === 'success')) await save(true);
   const failed = job.outcomes.filter(o => o.status === 'failed').length;
@@ -222,7 +241,73 @@ async function save(auto) {
   $('saved').textContent = `${auto ? '자동으로 ' : ''}다운로드 폴더에 ${filename} 저장을 요청했습니다 (PDF ${ok}건, 결과목록 포함).`;
 }
 
+// Error-log text file for bug reports. Contains no patient names, dates, IDs or server address.
+function scrub(text) {
+  let s = String(text ?? '');
+  for (const o of job.outcomes) if (o.row?.name && o.row.name.length > 1) s = s.split(o.row.name).join('[환자]');
+  return s.replace(/[a-z][a-z0-9+.-]*:\/\/[^\s'"<>)]+/gi, '[주소]')
+    .replace(/\b\d{1,3}(?:\.\d{1,3}){3}(?::\d+)?\b/g, '[주소]')
+    .replace(/\b[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}\b/gi, '[ID]')
+    .replace(/\b[0-9a-z_-]{20,}\b/gi, '[ID]');
+}
+function factsText(f) {
+  if (!f) return '';
+  const parts = [];
+  if (f.stage) parts.push(`단계=${f.stage}`);
+  if (f.printClicks != null) parts.push(`인쇄클릭=${f.printClicks}`);
+  if (f.pendingRequests != null) parts.push(`대기요청=${f.pendingRequests}`);
+  if (f.elapsedMs != null) parts.push(`소요=${(f.elapsedMs / 1000).toFixed(1)}초`);
+  if (f.detail) parts.push(`상세=${scrub(f.detail)}`);
+  return parts.join(' · ');
+}
+function errorLogText() {
+  const now = new Date();
+  const count = s => job.outcomes.filter(o => o.status === s).length;
+  const failed = job.outcomes.map((o, i) => ({o, no: i + 1})).filter(x => x.o.status === 'failed');
+  const byCode = {};
+  for (const {o} of failed) byCode[o.code] = (byCode[o.code] || 0) + 1;
+  const L = [];
+  L.push('temo 딸깍 오류 기록', '='.repeat(40),
+    '이 파일을 카카오톡 오픈채팅으로 보내 주세요: ' + REPORT_CHAT,
+    '환자 이름·검사일·환자/검사 ID·아이밸런스 주소는 들어 있지 않습니다.', '');
+  L.push('[환경]',
+    `확장 버전: ${chrome.runtime.getManifest().version}`,
+    `기록 시각: ${now.toISOString()} (컴퓨터 시간대 ${Intl.DateTimeFormat().resolvedOptions().timeZone})`,
+    `브라우저: ${navigator.userAgent}`,
+    `화면 언어: ${navigator.language}`, '');
+  L.push('[요약]',
+    `대상 월: ${job.month}`,
+    `확인한 환자 수: ${job.members}명`,
+    `대상 검사: ${job.outcomes.length}건 · 성공 ${count('success')}건 · 실패 ${failed.length}건`,
+    `시도 횟수: ${job.round}회(처음 1회 + 다시 시도 ${Math.max(0, job.round - 1)}회)`,
+    `목록 확인 문제: ${job.issues.length}건${job.issues.length ? ' (' + job.issues.map(i => i.code).join(', ') + ')' : ''}`, '');
+  L.push('[실패 사유별 건수]');
+  for (const [code, n] of Object.entries(byCode).sort((a, b) => b[1] - a[1])) L.push(`${code} ${n}건 — ${msg(code)}`);
+  L.push('', '[실패한 검사]');
+  for (const {o, no} of failed) L.push(`#${no} ${o.code} — ${msg(o.code)}${o.facts ? ' · ' + factsText(o.facts) : ''}`);
+  L.push('', '[진행 기록]');
+  for (const e of job.log) {
+    const head = `${e.t} [${e.round}회차] `;
+    if (e.type === 'start') L.push(head + `시작 (${e.month})`);
+    else if (e.type === 'catalogue') L.push(head + `목록 확인: 환자 ${e.members}명 · 검사 ${e.reports}건 · 목록 문제 ${e.issues.length}건`);
+    else if (e.type === 'retry') L.push(head + `실패한 검사 ${e.reports}건 다시 시도`);
+    else if (e.type === 'success') L.push(head + `#${e.no} 성공${e.facts ? ' · ' + factsText(e.facts) : ''}`);
+    else if (e.type === 'failed') L.push(head + `#${e.no} 실패 ${e.code}${e.facts ? ' · ' + factsText(e.facts) : ''}`);
+    else if (e.type === 'aborted') L.push(head + `작업 중단 ${e.code}${e.detail ? ' · 상세=' + scrub(e.detail) : ''}`);
+  }
+  L.push('', '='.repeat(40), '제보처: ' + REPORT_CHAT, '');
+  return L.join('\r\n');
+}
+async function saveErrorLog() {
+  const url = URL.createObjectURL(new Blob(['﻿' + errorLogText()], {type: 'text/plain;charset=utf-8'}));
+  const stamp = new Date().toISOString().replace(/[-:]/g, '').slice(0, 13).replace('T', '-');
+  const filename = `temo-ttalkkak-error-log-${job.month}-${stamp}.txt`;
+  try { await chrome.downloads.download({url, filename, conflictAction: 'uniquify', saveAs: false}); }
+  finally { setTimeout(() => URL.revokeObjectURL(url), 60000); }
+  say(`다운로드 폴더에 ${filename} 저장을 요청했습니다. 이 파일을 카카오톡 오픈채팅으로 보내 주세요.`);
+}
+
 // Test/documentation hook: lets a harness render the real UI from a given job state.
-globalThis.__moireUi = {render, busy, say};
+globalThis.__moireUi = {render, busy, say, errorLogText};
 
 init();

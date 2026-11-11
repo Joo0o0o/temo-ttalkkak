@@ -29,3 +29,4 @@ th:nth-child(-n+3),td:nth-child(-n+3){white-space:nowrap}
 .s-success{color:var(--ok)}.s-failed{color:var(--bad)}.s-pending{color:var(--muted)}.s-running{color:var(--warn)}
 details{margin-top:16px}summary{cursor:pointer;font-weight:600}
 @media (max-width:480px){.row{grid-template-columns:1fr}}
+.notice a{color:var(--brand);font-weight:600}
