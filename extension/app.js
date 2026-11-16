@@ -1,5 +1,6 @@
 import {Client, SourceError, TOKEN_KEY, TIMEZONE, catalogue, endpoints, monthRange, namesafe, originPatterns, parseTokens} from './lib/source.js';
 import {renderReport} from './lib/report.js';
+import {detectUiVersion} from './lib/legacy.js';
 import {ZipWriter} from './lib/zip.js';
 
 const MESSAGES = {
@@ -36,6 +37,7 @@ const MESSAGES = {
   MEASUREMENT_ID_INVALID: '검사 식별자를 확인할 수 없습니다.',
   MEASUREMENT_DATE_INVALID: '검사 날짜를 확인할 수 없습니다.',
   MEASUREMENT_CONFIG_INVALID: '검사 종류를 확인할 수 없습니다.',
+  UI_UNKNOWN: '아이밸런스 화면 버전을 확인하지 못했습니다. 주소가 맞는지 확인하고, 계속되면 오류 기록을 보내 주세요.',
 };
 const msg = code => MESSAGES[code] || MESSAGES.REPORT_FAILED;
 const $ = id => document.getElementById(id);
@@ -135,6 +137,10 @@ async function start() {
   try {
     const client = new Client(ep.frontend, await readTokens(ep));
     await client.me();
+    // Two iBalance UI versions exist; decide once from the public main bundle (lib/legacy.js).
+    job.ui = await detectUiVersion(ep.frontend);
+    logEvent('ui', {ui: job.ui.ui, bundle: job.ui.bundle});
+    if (job.ui.ui === 'unknown') throw new SourceError('UI_UNKNOWN');
     render('환자 목록 확인 중');
     const members = await client.members();
     job.members = members.length;
@@ -185,7 +191,7 @@ async function runReports(ep) {
       if (job.stop) break;
       o.status = 'running'; render(`${o.row.name} 리포트 만드는 중`);
       const cfg = {
-        frontend: ep.frontend, api: ep.api,
+        frontend: ep.frontend, api: ep.api, ui: job.ui?.ui,
         target: ep.frontend + '#/measurement-result?memberId=' + o.row.memberId + '&measurementType=MOIRE',
         tokens: {...tokens},
         monthly: {memberId: o.row.memberId, measurementId: o.row.measurementId, measurementType: 'MOIRE', timezone: TIMEZONE},
@@ -268,7 +274,10 @@ function factsText(f) {
   if (f.elapsedMs != null) parts.push(`소요=${(f.elapsedMs / 1000).toFixed(1)}초`);
   if (f.detail) parts.push(`상세=${scrub(f.detail)}`);
   // Already reduced to ASCII rule/type/port/masked path/GraphQL names in report.js; scrub() would hide long operation names.
+  if (f.legacyStep) parts.push(`옛화면단계=${f.legacyStep}`);
   if (f.blocked) parts.push(`차단요청=${blockedText(f.blocked)}`);
+  // Sidebar patient-list reads that were denied without stopping the report (names only, built in report.js).
+  if (Array.isArray(f.ignored) && f.ignored.length) parts.push(`무시한조회=[${f.ignored.join(' | ')}]`);
   return parts.join(' · ');
 }
 // One line describing the request that stopped a report. Built from describeBlocked() fields only.
@@ -308,6 +317,7 @@ function errorLogText() {
   for (const e of job.log) {
     const head = `${e.t} [${e.round}회차] `;
     if (e.type === 'start') L.push(head + `시작 (${e.month})${e.remapped ? ' · 입력 주소 3001→3003' : ''}`);
+    else if (e.type === 'ui') L.push(head + `아이밸런스 화면: ${e.ui === 'new' ? '새 버전' : e.ui === 'old' ? '옛 버전' : '확인 못 함'}${e.bundle && /^main\.[0-9a-f]+\.js$/.test(e.bundle) ? ' (' + e.bundle + ')' : ''}`);
     else if (e.type === 'catalogue') L.push(head + `목록 확인: 환자 ${e.members}명 · 검사 ${e.reports}건 · 목록 문제 ${e.issues.length}건`);
     else if (e.type === 'retry') L.push(head + `실패한 검사 ${e.reports}건 다시 시도`);
     else if (e.type === 'success') L.push(head + `#${e.no} 성공${e.facts ? ' · ' + factsText(e.facts) : ''}`);

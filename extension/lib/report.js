@@ -3,7 +3,9 @@
 // code (selection, provenance, print capture, read-only request policy) is generated
 // verbatim into report-src.js.
 import {fail, requestDecision, captureHook, openReportExpression, provenanceExpression,
-  printReportExpression} from './report-src.js';
+  printReportExpression, READ_QUERIES, canonical} from './report-src.js';
+import {legacyCaptureHook, legacySelectExpression, legacyProvenanceExpression, legacyPrintExpression,
+  legacyResultHref} from './legacy.js';
 
 const PRINT_CLICKS = 3, PRINT_RECLICK_MS = 15000, REPORT_BUDGET_MS = 180000, MAX_PDF = 32 * 1024 * 1024;
 const delay = ms => new Promise(r => setTimeout(r, ms));
@@ -22,19 +24,48 @@ function maskPath(pathname) {
   const kept = parts.slice(0, 6).map(p => /^[A-Za-z][A-Za-z._-]{0,29}$/.test(p) && !/[a-f]{12,}/i.test(p) ? p : ':x');
   return '/' + kept.join('/') + (parts.length > 6 ? '/…' : '');
 }
-function graphqlOperation(request, u) {
-  let body = {};
+// Shape of a GraphQL request with names only: kind, operation name, first field, variable NAMES (never values)
+// and whether the text equals the allowlisted query of the same name.
+function graphqlShape(request, u) {
+  let body;
   try {
     if (request.method === 'POST') body = JSON.parse(request.postData || '{}');
-    else body = {query: u.searchParams.get('query'), operationName: u.searchParams.get('operationName')};
-  } catch { return 'unreadable'; }
-  if (Array.isArray(body)) return 'batch';
-  const query = typeof body?.query === 'string' ? body.query : '';
+    else body = {query: u.searchParams.get('query'), operationName: u.searchParams.get('operationName'),
+      variables: JSON.parse(u.searchParams.get('variables') || '{}')};
+  } catch { return null; }
+  if (!body || typeof body !== 'object' || Array.isArray(body)) return null;
+  const query = typeof body.query === 'string' ? body.query : '';
   const head = query.match(/^\s*(query|mutation|subscription)\b\s*([A-Za-z_][A-Za-z0-9_]*)?/);
   const kind = head ? head[1] : (query.trim().startsWith('{') ? 'query' : '?');
   const field = query.match(/\{\s*([A-Za-z_][A-Za-z0-9_]*)/)?.[1];
-  const name = typeof body?.operationName === 'string' ? body.operationName : head?.[2];
-  return `${kind} ${NAME.test(name || '') ? name : '-'} 첫필드=${NAME.test(field || '') ? field : '-'}`;
+  const rawName = typeof body.operationName === 'string' ? body.operationName : head?.[2];
+  const name = NAME.test(rawName || '') ? rawName : '-';
+  const v = body.variables && typeof body.variables === 'object' && !Array.isArray(body.variables) ? Object.keys(body.variables) : [];
+  const vars = v.filter(k => NAME.test(k)).slice(0, 6).join(',') + (v.length > 6 ? ',…' : '') || '-';
+  const known = Object.hasOwn(READ_QUERIES, name) ? (canonical(query) === canonical(READ_QUERIES[name]) ? '같음' : '다름') : '없음';
+  const extra = Object.keys(body).filter(k => !['query', 'operationName', 'variables'].includes(k));
+  return {kind, name, field: NAME.test(field || '') ? field : '-', vars, known,
+    extra: extra.filter(k => NAME.test(k)).slice(0, 3).join(',') || null,
+    multi: (query.match(/\b(?:query|mutation|subscription)\b/g) || []).length > 1};
+}
+function shapeText(s) {
+  if (!s) return 'unreadable';
+  return `${s.kind} ${s.name} 첫필드=${s.field} 변수=${s.vars} 허용목록과=${s.known}${s.extra ? ' 추가키=' + s.extra : ''}`;
+}
+function graphqlOperation(request, u) { return shapeText(graphqlShape(request, u)); }
+
+// The official result page also loads the patient list (`query members`) for its left sidebar. Some clinic
+// installs send a different version of that query (2026-11-16 clinic log: XHR `query members` blocked at
+// EXAM_SELECT within 0.4 s), which the generated allowlist rejects as ORIGIN_BLOCKED and the whole report stops.
+// The report does not need that list: the request is still denied (it never reaches the server) but it no
+// longer stops the report, like the sidebar `queue` preload in report-src.js. Only a single read operation
+// named `members` whose first field is `members`, sent to the exact API address, qualifies.
+export function sidebarMembersRead(request, type, cfg) {
+  try {
+    if (request.method !== 'POST' || !['XHR', 'Fetch'].includes(type) || request.url !== cfg.api) return false;
+    const s = graphqlShape(request, new URL(request.url));
+    return !!s && s.kind === 'query' && !s.multi && s.name === 'members' && s.field === 'members';
+  } catch { return false; }
 }
 export function describeBlocked(request, type, cfg, code) {
   const out = {code, type: NAME.test(type || '') ? type : '?', method: NAME.test(request?.method || '') ? request.method : '?'};
@@ -66,7 +97,13 @@ export async function renderReport(cfg, {windowId, onStage = () => {}} = {}) {
   const onEvent = (source, method, params) => {
     if (source.tabId !== tabId) return;
     if (method === 'Fetch.requestPaused') {
-      const decision = requestDecision(params.request, params.resourceType, cfg, printing);
+      let decision = requestDecision(params.request, params.resourceType, cfg, printing);
+      if (decision.code === 'ORIGIN_BLOCKED' && sidebarMembersRead(params.request, params.resourceType, cfg)) {
+        decision = {allow: false, code: null};
+        const seen = graphqlOperation(params.request, new URL(params.request.url));
+        facts.ignored = facts.ignored || [];
+        if (facts.ignored.length < 3 && !facts.ignored.includes(seen)) facts.ignored.push(seen);
+      }
       chrome.debugger.sendCommand({tabId}, decision.allow ? 'Fetch.continueRequest' : 'Fetch.failRequest',
         {requestId: params.requestId, ...(decision.allow ? {} : {errorReason: 'BlockedByClient'})}).catch(() => {}); // the request may already be cancelled by a navigation; nothing is left to continue
       if (decision.code && !fatal) facts.blocked = describeBlocked(params.request, params.resourceType, cfg, decision.code);
@@ -105,17 +142,21 @@ export async function renderReport(cfg, {windowId, onStage = () => {}} = {}) {
     await send('Fetch.enable', {patterns: [{urlPattern: '*', requestStage: 'Request'}]});
     // Extensions may not override the timezone; app.js refuses to start unless the PC runs KST.
     await send('Emulation.setFocusEmulationEnabled', {enabled: true}).catch(() => {});
-    await send('Page.addScriptToEvaluateOnNewDocument', {source: captureHook(cfg)});
+    // cfg.ui comes from detectUiVersion() at the start of the run: 'old' takes the legacy.js flow.
+    const legacy = cfg.ui === 'old';
+    const expectHref = legacy ? legacyResultHref(cfg) : cfg.target;
+    const provenance = legacy ? legacyProvenanceExpression(cfg) : provenanceExpression(cfg);
+    await send('Page.addScriptToEvaluateOnNewDocument', {source: legacy ? legacyCaptureHook(cfg) : captureHook(cfg)});
     stage('NAVIGATE');
     const nav = await send('Page.navigate', {url: cfg.target});
     if (nav.errorText) throw fail('NAVIGATION_FAILED');
     stage('EXAM_SELECT');
-    await poll(openReportExpression(cfg), 'SELECTION_FAILED');
-    if (await evaluate('location.href') !== cfg.target) throw fail('AUTH_ENDED');
+    await poll(legacy ? legacySelectExpression(cfg) : openReportExpression(cfg), 'SELECTION_FAILED');
+    if (await evaluate('location.href') !== expectHref) throw fail('AUTH_ENDED');
     stage('REPORT_PROVENANCE');
-    await poll(provenanceExpression(cfg), 'PROVENANCE_FAILED');
+    await poll(provenance, 'PROVENANCE_FAILED');
     stage('PRINT_PREPARE');
-    const clickPrint = '(' + provenanceExpression(cfg) + '&&' + printReportExpression() + ')';
+    const clickPrint = '(' + provenance + '&&' + (legacy ? legacyPrintExpression() : printReportExpression()) + ')';
     await poll(clickPrint, 'PRINT_NOT_FOUND');
     facts.printClicks = 1;
     stage('PRINT_CAPTURE');
@@ -132,7 +173,7 @@ export async function renderReport(cfg, {windowId, onStage = () => {}} = {}) {
       await poll(clickPrint, 'PRINT_NOT_FOUND', PRINT_RECLICK_MS);
       facts.printClicks = click + 1;
     }
-    if (await evaluate('location.href') !== cfg.target) throw fail('AUTH_ENDED');
+    if (await evaluate('location.href') !== expectHref) throw fail('AUTH_ENDED');
     const html = await evaluate('window.__ibReport.html');
     if (typeof html !== 'string' || html.length > 24 * 1024 * 1024) throw fail('CAPTURE_FAILED');
     stage('RESOURCES_READY');
@@ -152,6 +193,14 @@ export async function renderReport(cfg, {windowId, onStage = () => {}} = {}) {
     return {bytes, facts: {...facts, elapsedMs: Math.round(performance.now() - started)}};
   } catch (e) {
     const code = e?.code || (/debugger|attach/i.test(String(e?.message)) ? 'DEBUGGER_BLOCKED' : 'REPORT_FAILED');
+    // Old UI: the last step legacy.js reached (fixed ASCII label, no data) shows where a clinic run stopped.
+    if (cfg.ui === 'old' && attached) {
+      try {
+        const r = await chrome.debugger.sendCommand({tabId}, 'Runtime.evaluate', {expression: 'window.__ibLegacy?.step', returnByValue: true});
+        const v = r?.result?.value;
+        if (typeof v === 'string' && /^[a-z0-9-]{1,30}$/.test(v)) facts.legacyStep = v;
+      } catch {}
+    }
     throw Object.assign(new Error(code), {code, facts: {...facts, elapsedMs: Math.round(performance.now() - started), detail: e?.code ? undefined : String(e?.message || e).slice(0, 200)}});
   } finally {
     chrome.debugger.onEvent.removeListener(onEvent);
