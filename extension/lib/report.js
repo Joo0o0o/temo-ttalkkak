@@ -10,6 +10,50 @@ const delay = ms => new Promise(r => setTimeout(r, ms));
 const VERSION = '1.3';
 const PRINT_RESOURCES = ['Image', 'Font', 'Stylesheet', 'Media'];
 
+// Error-log diagnostics for a request that stopped the report (e.g. ORIGIN_BLOCKED).
+// Mirrors the rule order of report-src.js requestDecision() without changing it.
+// Never includes the host, query string, variables, body or any id: only the rule, request
+// kind, which side (frontend/api/other) and port, a masked path and the GraphQL operation name.
+const UNSAFE_PATH = /(?:^|\/)(?:login|logout|auth|refresh|send[^/]*|pacs|alimtalk|mutation)(?:\/|$)/i;
+// ASCII identifier, but not something that looks like an id (hex run or long digit run).
+const NAME = {test: v => /^[A-Za-z_][A-Za-z0-9_]{0,39}$/.test(v) && !/[a-f0-9]{12,}/i.test(v) && !/\d{5,}/.test(v)};
+function maskPath(pathname) {
+  const parts = pathname.split('/').filter(Boolean);
+  const kept = parts.slice(0, 6).map(p => /^[A-Za-z][A-Za-z._-]{0,29}$/.test(p) && !/[a-f]{12,}/i.test(p) ? p : ':x');
+  return '/' + kept.join('/') + (parts.length > 6 ? '/…' : '');
+}
+function graphqlOperation(request, u) {
+  let body = {};
+  try {
+    if (request.method === 'POST') body = JSON.parse(request.postData || '{}');
+    else body = {query: u.searchParams.get('query'), operationName: u.searchParams.get('operationName')};
+  } catch { return 'unreadable'; }
+  if (Array.isArray(body)) return 'batch';
+  const query = typeof body?.query === 'string' ? body.query : '';
+  const head = query.match(/^\s*(query|mutation|subscription)\b\s*([A-Za-z_][A-Za-z0-9_]*)?/);
+  const kind = head ? head[1] : (query.trim().startsWith('{') ? 'query' : '?');
+  const field = query.match(/\{\s*([A-Za-z_][A-Za-z0-9_]*)/)?.[1];
+  const name = typeof body?.operationName === 'string' ? body.operationName : head?.[2];
+  return `${kind} ${NAME.test(name || '') ? name : '-'} 첫필드=${NAME.test(field || '') ? field : '-'}`;
+}
+export function describeBlocked(request, type, cfg, code) {
+  const out = {code, type: NAME.test(type || '') ? type : '?', method: NAME.test(request?.method || '') ? request.method : '?'};
+  let u;
+  try { u = new URL(request.url); } catch { return {...out, rule: 'URL_UNREADABLE'}; }
+  const f = new URL(cfg.frontend), a = new URL(cfg.api);
+  out.side = u.origin === f.origin ? 'frontend' : u.origin === a.origin ? 'api' : u.protocol === 'blob:' ? 'blob' : 'other';
+  out.scheme = u.protocol.replace(':', '');
+  out.port = u.port || (u.protocol === 'https:' ? '443' : u.protocol === 'http:' ? '80' : '-');
+  out.path = maskPath(u.pathname);
+  out.hasQuery = !!u.search;
+  if (u.port === '5001') out.rule = 'PORT_5001';
+  else if (UNSAFE_PATH.test(u.pathname)) out.rule = 'UNSAFE_PATH';
+  else if (u.origin === a.origin && u.pathname === a.pathname && type !== 'WebSocket') { out.rule = 'API_NOT_ALLOWED'; out.op = graphqlOperation(request, u); }
+  else if (type === 'Document') { out.rule = 'DOCUMENT'; out.samePathAsTarget = u.origin === f.origin && u.pathname === new URL(cfg.target).pathname; }
+  else out.rule = code === 'AUTH_ENDED' ? 'AUTH_REQUEST' : 'OTHER';
+  return out;
+}
+
 export async function renderReport(cfg, {windowId, onStage = () => {}} = {}) {
   const started = performance.now(), remaining = () => Math.max(0, REPORT_BUDGET_MS - (performance.now() - started));
   let tabId = null, attached = false, fatal = null, printing = false;
@@ -25,6 +69,7 @@ export async function renderReport(cfg, {windowId, onStage = () => {}} = {}) {
       const decision = requestDecision(params.request, params.resourceType, cfg, printing);
       chrome.debugger.sendCommand({tabId}, decision.allow ? 'Fetch.continueRequest' : 'Fetch.failRequest',
         {requestId: params.requestId, ...(decision.allow ? {} : {errorReason: 'BlockedByClient'})}).catch(() => {}); // the request may already be cancelled by a navigation; nothing is left to continue
+      if (decision.code && !fatal) facts.blocked = describeBlocked(params.request, params.resourceType, cfg, decision.code);
       if (decision.code) fatal = fatal || decision.code;
     }
     if (method === 'Network.requestWillBeSent') inflight.set(params.requestId, params.type);

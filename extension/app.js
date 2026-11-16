@@ -94,8 +94,17 @@ function render(stageText = '') {
   $('report').hidden = !showReport; $('report-help').hidden = !showReport;
 }
 
+// Same iBalance on another screen port (e.g. 3001 and 3003 on one PC): same host and scheme, any port
+// except the API port. The typed address is tried first; the report itself still opens on the typed address.
+function sameIbalance(url, ep) {
+  try {
+    const u = new URL(url), f = new URL(ep.frontend), a = new URL(ep.api);
+    return u.protocol === f.protocol && u.hostname === f.hostname && u.port !== a.port;
+  } catch { return false; }
+}
 async function readTokens(ep) {
-  const tabs = (await chrome.tabs.query({})).filter(t => { try { return new URL(t.url).origin === ep.origin; } catch { return false; } });
+  const tabs = (await chrome.tabs.query({})).filter(t => sameIbalance(t.url, ep))
+    .sort((x, y) => (new URL(y.url).origin === ep.origin) - (new URL(x.url).origin === ep.origin));
   for (const tab of tabs) {
     try {
       const [r] = await chrome.scripting.executeScript({target: {tabId: tab.id}, func: key => localStorage.getItem(key), args: [TOKEN_KEY]});
@@ -258,7 +267,17 @@ function factsText(f) {
   if (f.pendingRequests != null) parts.push(`대기요청=${f.pendingRequests}`);
   if (f.elapsedMs != null) parts.push(`소요=${(f.elapsedMs / 1000).toFixed(1)}초`);
   if (f.detail) parts.push(`상세=${scrub(f.detail)}`);
+  // Already reduced to ASCII rule/type/port/masked path/GraphQL names in report.js; scrub() would hide long operation names.
+  if (f.blocked) parts.push(`차단요청=${blockedText(f.blocked)}`);
   return parts.join(' · ');
+}
+// One line describing the request that stopped a report. Built from describeBlocked() fields only.
+function blockedText(b) {
+  const bits = [`규칙 ${b.rule || '?'}`, `${b.type || '?'} ${b.method || '?'}`];
+  if (b.side) bits.push(`${b.side} ${b.scheme}:${b.port} ${b.path}${b.hasQuery ? '?…' : ''}`);
+  if (b.op) bits.push(`조회 ${b.op}`);
+  if (b.samePathAsTarget != null) bits.push(`결과지와 같은 경로=${b.samePathAsTarget ? '예' : '아니오'}`);
+  return '[' + bits.join(' / ') + ']';
 }
 function errorLogText() {
   const now = new Date();

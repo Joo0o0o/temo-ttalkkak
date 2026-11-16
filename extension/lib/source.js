@@ -15,11 +15,15 @@ export class SourceError extends Error {
 const AUTH_CODES = new Set(['DUPLICATED_LOGIN', 'TOKEN_EXPIRED: ACCESS', 'TOKEN_EXPIRED: REFRESH',
   'USER_UNAUTHORIZED', 'UNAUTHENTICATED', 'FORBIDDEN']);
 
-/** Normalise the address the clinic types into frontend + API endpoints. */
+/** Normalise the address the clinic types into frontend + API endpoints.
+ *  Anything after '#' is an in-app screen (e.g. `#/` copied from the address bar), so it is dropped:
+ *  `http://h:3003`, `http://h:3003/`, `http://h:3003/#/` and `h:3003/#/...` all give the same result. */
 export function endpoints(value) {
-  if (typeof value !== 'string' || !value.trim() || /[\s\\]/.test(value.trim())) throw new SourceError('URL_INVALID');
+  if (typeof value !== 'string') throw new SourceError('URL_INVALID');
+  value = value.trim().split('#')[0].trim();
+  if (!value || /[\s\\]/.test(value)) throw new SourceError('URL_INVALID');
   let url;
-  try { url = new URL(value.includes('://') ? value.trim() : 'http://' + value.trim()); } catch { throw new SourceError('URL_INVALID'); }
+  try { url = new URL(value.includes('://') ? value : 'http://' + value); } catch { throw new SourceError('URL_INVALID'); }
   if (!['http:', 'https:'].includes(url.protocol) || !url.hostname || url.username || url.password || url.search || url.hash) {
     throw new SourceError('URL_INVALID');
   }
