@@ -94,8 +94,8 @@ function render(stageText = '') {
   $('report').hidden = !showReport; $('report-help').hidden = !showReport;
 }
 
-// Same iBalance on another screen port (e.g. 3001 and 3003 on one PC): same host and scheme, any port
-// except the API port. The typed address is tried first; the report itself still opens on the typed address.
+// Login may live on another device screen of the same PC (e.g. 3001 while MOIRE is 3003): same host and
+// scheme, any port except the API port. The MOIRE address (ep.origin) is tried first; reports always open there.
 function sameIbalance(url, ep) {
   try {
     const u = new URL(url), f = new URL(ep.frontend), a = new URL(ep.api);
@@ -128,10 +128,10 @@ async function start() {
   $('address').value = ep.frontend;
   Object.assign(job, {stop: false, outcomes: [], issues: [], members: 0, scanned: 0, ep, log: [], round: 1,
     month: `${year}-${String(month).padStart(2, '0')}`, scope: monthRange(year, month)});
-  logEvent('start', {month: job.month});
+  logEvent('start', {month: job.month, remapped: ep.remapped});
   if (job.zipUrl) { URL.revokeObjectURL(job.zipUrl); job.zipUrl = null; }
   $('saved').hidden = true;
-  busy(true); say('');
+  busy(true); say(ep.remapped ? '3001은 다른 검사 장비 화면이라, 모아레 리포트가 있는 3003 주소로 바꿔서 진행합니다.' : '');
   try {
     const client = new Client(ep.frontend, await readTokens(ep));
     await client.me();
@@ -307,7 +307,7 @@ function errorLogText() {
   L.push('', '[진행 기록]');
   for (const e of job.log) {
     const head = `${e.t} [${e.round}회차] `;
-    if (e.type === 'start') L.push(head + `시작 (${e.month})`);
+    if (e.type === 'start') L.push(head + `시작 (${e.month})${e.remapped ? ' · 입력 주소 3001→3003' : ''}`);
     else if (e.type === 'catalogue') L.push(head + `목록 확인: 환자 ${e.members}명 · 검사 ${e.reports}건 · 목록 문제 ${e.issues.length}건`);
     else if (e.type === 'retry') L.push(head + `실패한 검사 ${e.reports}건 다시 시도`);
     else if (e.type === 'success') L.push(head + `#${e.no} 성공${e.facts ? ' · ' + factsText(e.facts) : ''}`);

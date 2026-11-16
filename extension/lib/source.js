@@ -15,9 +15,15 @@ export class SourceError extends Error {
 const AUTH_CODES = new Set(['DUPLICATED_LOGIN', 'TOKEN_EXPIRED: ACCESS', 'TOKEN_EXPIRED: REFRESH',
   'USER_UNAUTHORIZED', 'UNAUTHENTICATED', 'FORBIDDEN']);
 
+// On one iBalance PC, port 3001 is a different exam device's screen that shares the host and API;
+// MOIRE reports only open on 3003 (3001 cannot select a MOIRE exam: SELECTION_FAILED on the test server).
+// Clinics often have 3001 bookmarked, so it is treated as 3003.
+const OTHER_DEVICE_PORT = '3001', MOIRE_PORT = '3003';
+
 /** Normalise the address the clinic types into frontend + API endpoints.
  *  Anything after '#' is an in-app screen (e.g. `#/` copied from the address bar), so it is dropped:
- *  `http://h:3003`, `http://h:3003/`, `http://h:3003/#/` and `h:3003/#/...` all give the same result. */
+ *  `http://h:3003`, `http://h:3003/`, `http://h:3003/#/` and `h:3003/#/...` all give the same result.
+ *  Port 3001 becomes 3003 (`remapped: true`). */
 export function endpoints(value) {
   if (typeof value !== 'string') throw new SourceError('URL_INVALID');
   value = value.trim().split('#')[0].trim();
@@ -27,10 +33,12 @@ export function endpoints(value) {
   if (!['http:', 'https:'].includes(url.protocol) || !url.hostname || url.username || url.password || url.search || url.hash) {
     throw new SourceError('URL_INVALID');
   }
+  const remapped = url.port === OTHER_DEVICE_PORT;
+  if (remapped) url.port = MOIRE_PORT;
   const frontend = url.origin + (url.pathname || '/');
   const host = url.hostname.includes(':') ? `[${url.hostname}]` : url.hostname;
   const api = `${url.protocol}//${host}:8080/graphql`;
-  return {frontend, api, origin: url.origin, apiOrigin: new URL(api).origin};
+  return {frontend, api, origin: url.origin, apiOrigin: new URL(api).origin, remapped};
 }
 
 /** Host permission patterns. Match patterns ignore ports, so one pattern covers 3003 and 8080. */

@@ -4,6 +4,8 @@
 // (what a clinic's own login leaves behind), then drives the extension UI like a user.
 // Credentials come only from env vars and are never written to disk.
 //   MOIRE_URL=http://host:3003/ MOIRE_USER=.. MOIRE_PASS=.. MOIRE_MONTH=2026-10 OUT=/dir node tests/e2e-source.cjs
+// Optional: MOIRE_LOGIN_URL = where the clinic is logged in (default MOIRE_URL, e.g. http://host:3001/),
+//           MOIRE_ADDRESS   = exactly what is typed into the address box (default MOIRE_URL, e.g. host:3003/#/).
 'use strict';
 const {spawn} = require('node:child_process');
 const fs = require('node:fs'), path = require('node:path'), os = require('node:os');
@@ -38,11 +40,11 @@ async function main() {
     const tokens = login?.data?.login?.tokens; if (!tokens?.access) throw Error('LOGIN_FAILED');
     const open = async url => { const {targetId} = await send('Target.createTarget', {url}); const {sessionId} = await send('Target.attachToTarget', {targetId, flatten: true}); await send('Runtime.enable', {}, sessionId); return sessionId; };
     const evaluate = async (s, expression, userGesture = false) => (await send('Runtime.evaluate', {expression, awaitPromise: true, returnByValue: true, userGesture}, s)).result?.value;
-    const clinic = await open(front.href); await delay(2500);
+    const clinic = await open(process.env.MOIRE_LOGIN_URL || front.href); await delay(2500);
     if (!process.env.NO_LOGIN) await evaluate(clinic, `localStorage.setItem('PomChecker__TokensLocalStorageService__tokens', ${JSON.stringify(JSON.stringify(tokens))});true`);
     const app = await open(`chrome-extension://${extId}/app.html`); await delay(1000);
     const [y, m] = MOIRE_MONTH.split('-').map(Number);
-    await evaluate(app, `(()=>{const set=(id,v)=>{const e=document.getElementById(id);e.value=v;e.dispatchEvent(new Event('change'));};set('address',${JSON.stringify(front.href)});set('year','${y}');set('month','${m}');return true;})()`);
+    await evaluate(app, `(()=>{const set=(id,v)=>{const e=document.getElementById(id);e.value=v;e.dispatchEvent(new Event('change'));};set('address',${JSON.stringify(process.env.MOIRE_ADDRESS || front.href)});set('year','${y}');set('month','${m}');return true;})()`);
     const t0 = Date.now();
     await evaluate(app, `document.getElementById('start').click();true`, true);
     let last = '';
