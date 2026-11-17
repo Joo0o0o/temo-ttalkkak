@@ -5,7 +5,7 @@
 //    page shows a 종합 리포트 modal with 프린트/PACS/알림톡/닫기 buttons. Confirmed on a test install.
 // The version is decided once per run from the public main bundle (detectUiVersion). The old flow below uses
 // the page's own handlers and data (React props), not minified component names, so other old builds still work.
-// The report body (print iframe capture, `.sc-1ovj0ov-*`, print icon mask) is shared by both versions (anybuild.js).
+// The report body (print iframe capture, report root, print icon) is shared by both versions (anybuild.js).
 const FETCH_TIMEOUT_MS = 15000;
 
 /** Decide the UI version from the clinic's public main bundle. Never sends credentials. */
@@ -26,7 +26,8 @@ export async function detectUiVersion(frontend) {
     if (url.origin !== front.origin) return {ui: 'unknown', bundle: null};
     const bundle = url.pathname.split('/').pop(), js = await get(url.href), has = t => js.includes(t);
     if (has('measure-insight-view') && has('openReportModal')) return {ui: 'new', bundle};
-    if (!has('measure-insight-view') && has('selectMemberId') && has('isSelectedInPage') && has('onReportClose')) return {ui: 'old', bundle};
+    // Old builds differ too (d4a11e22 had `isSelectedInPage`, 2e4729dd does not): only markers both share.
+    if (!has('measure-insight-view') && has('selectMemberId') && has('onReportClose')) return {ui: 'old', bundle};
     return {ui: 'unknown', bundle};
   } catch { return {ui: 'unknown', bundle: null}; }
 }
@@ -83,32 +84,56 @@ function legacySelectExam(monthly) {
   }
   // 4) not on this page: go to the page that holds it (pagination numbers under that table).
   // The page has one table per body part (정면/측면 posture, 후면 MOIRE…); use the table of the part that holds it.
-  const all = list.find(f => Array.isArray(p(f).data) && typeof p(f).onSelectMeasurement === 'function' && typeof p(f).isSelectedInPage !== 'boolean' && p(f).data.some(x => x?.id === wanted));
+  // Tables are told apart by their data, not by props that come and go with the page state (`isSelectedInPage`,
+  // `pageWithSelectedRow` exist only once a row is selected): the full table is the largest one holding the exam,
+  // the paged table is a smaller one of the same part whose rows all come from the full table.
+  const tables = list.filter(f => Array.isArray(p(f).data) && typeof p(f).onSelectMeasurement === 'function');
+  const all = tables.filter(f => p(f).data.some(x => x?.id === wanted)).sort((a, b) => p(b).data.length - p(a).data.length)[0];
   if (!all) return at('table-missing');
-  const paged = list.find(f => Array.isArray(p(f).data) && typeof p(f).isSelectedInPage === 'boolean' && p(f).part === p(all).part && p(f).data.length);
+  const ids = new Set(p(all).data.map(x => x?.id));
+  const paged = tables.filter(f => p(f).part === p(all).part && p(f).data.length && p(f).data.length < p(all).data.length && p(f).data.every(x => ids.has(x?.id)))
+    .sort((a, b) => p(a).data.length - p(b).data.length)[0];
   if (!paged) return at('page-table-missing');
-  const data = p(all).data, idx = data.findIndex(x => x?.id === wanted), first = data.findIndex(x => x?.id === p(paged).data[0]?.id);
+  const data = p(all).data, rows = p(paged).data, idx = data.findIndex(x => x?.id === wanted), first = data.findIndex(x => x?.id === rows[0]?.id);
   if (idx < 0 || first < 0) return at('page-index');
-  st.pageSize = Math.max(st.pageSize, p(paged).data.length);
-  const current = Math.floor(first / st.pageSize) + 1, target = Math.floor(idx / st.pageSize) + 1;
-  if (current === target || st.page >= 60 || now - st.pageAt < 800) return at(current === target ? 'page-rendering' : 'page-wait');
+  st.pageSize = Math.max(st.pageSize, rows.length);
+  // Page shows the full list in its own order only if its rows are a contiguous slice of it. Before any row is
+  // selected the table can sort the page differently; then the page number of the exam cannot be computed.
+  if (st.page >= 120 || now - st.pageAt < 600) return at('page-wait');
   // The table's own pagination: numbers 1..5 at a time plus ‹ › that move to the previous/next group of 5
-  // (a short window shows 2 rows per page → 7 pages, so page 7 is behind ›). Use its handlers: a number calls
-  // onChangePage(n), › calls onChangeNextPageRange().
+  // (a short window shows 1-2 rows per page → many pages). Use its handlers: a number calls onChangePage(n),
+  // › calls onChangeNextPageRange() (which also opens the first page of the next group).
   const pager = list.find(f => {
     const q = p(f);
     if (typeof q.onChangePage !== 'function' || !q.pageRange || typeof q.pageRange.start !== 'number' || typeof q.pageRange.end !== 'number') return false;
     for (let x = f.return, i = 0; x && i < 16; x = x.return, i++) if (x === all || x === all.alternate) return true;
     return false;
   });
+  const current = pager && typeof p(pager).currentPage === 'number' ? p(pager).currentPage : Math.floor(first / st.pageSize) + 1;
+  // Same order only if the visible rows are exactly the slice the current page number points at (one row per
+  // page always looks contiguous, so the page number must agree too).
+  const sameOrder = !st.walk && first === (current - 1) * st.pageSize && rows.every((x, i) => data[first + i]?.id === x?.id);
+  // Known order: jump to the computed page. Unknown order: walk the pages one by one from page 1 (the row check
+  // above stops the walk on the page that shows the exam).
+  let target;
+  if (sameOrder) target = Math.floor(idx / st.pageSize) + 1;
+  else if (!st.walk) { st.walk = true; target = 1; }
+  else target = current + 1;
+  if (target === current) {
+    // On the computed page but the exam row is still missing after 2.5 s: stop trusting the order and walk.
+    if (!st.renderAt) st.renderAt = now;
+    if (now - st.renderAt > 2500) { st.walk = true; st.renderAt = 0; }
+    return at('page-rendering');
+  }
+  st.renderAt = 0;
   if (pager) {
     const q = p(pager), r = q.pageRange;
     if (target >= r.start && target <= r.end) q.onChangePage(target);
     else if (target > r.end && q.hasNextPageRange && typeof q.onChangeNextPageRange === 'function') q.onChangeNextPageRange();
     else if (target < r.start && q.hasPrevPageRange && typeof q.onChangePrevPageRange === 'function') q.onChangePrevPageRange();
-    else return at('page-out-of-range');
+    else return at(sameOrder ? 'page-out-of-range' : 'page-walk-end');
     st.page++; st.pageAt = now;
-    return at('page-change');
+    return at(sameOrder ? 'page-change' : 'page-walk');
   }
   // Fallback without that component: click the number under the table.
   // DOM of that paged table (first host element under its fiber), then the box that also holds its pagination.
