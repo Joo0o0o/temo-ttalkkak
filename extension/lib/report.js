@@ -2,10 +2,9 @@
 // Same stage order and checks as the downloader's native_report.cjs run(); the page-side
 // code (selection, provenance, print capture, read-only request policy) is generated
 // verbatim into report-src.js.
-import {fail, requestDecision, captureHook, openReportExpression, provenanceExpression,
-  printReportExpression, READ_QUERIES, canonical} from './report-src.js';
-import {legacyCaptureHook, legacySelectExpression, legacyProvenanceExpression, legacyPrintExpression,
-  legacyResultHref} from './legacy.js';
+import {fail, requestDecision, READ_QUERIES, canonical} from './report-src.js';
+import {legacySelectExpression, legacyResultHref} from './legacy.js';
+import {newSelectExpression, provenanceExpression, captureHook, printExpression} from './anybuild.js';
 
 const PRINT_CLICKS = 3, PRINT_RECLICK_MS = 15000, REPORT_BUDGET_MS = 180000, MAX_PDF = 32 * 1024 * 1024;
 const delay = ms => new Promise(r => setTimeout(r, ms));
@@ -67,6 +66,21 @@ export function sidebarMembersRead(request, type, cfg) {
     return !!s && s.kind === 'query' && !s.multi && s.name === 'members' && s.field === 'members';
   } catch { return false; }
 }
+// A read of ANOTHER patient (`query member`/`getMeasurements` with an id that is not this report's patient).
+// A clinic build reloaded the previous report's patient and that read stopped every later report
+// (2026-11-16 log: ORIGIN_BLOCKED, member, text same as the allowlist, other id). It stays denied (no other
+// patient's data reaches the page) but no longer stops the report; the report itself is checked by provenance.
+export function otherMemberRead(request, type, cfg) {
+  try {
+    if (request.method !== 'POST' || !['XHR', 'Fetch'].includes(type) || request.url !== cfg.api) return false;
+    const s = graphqlShape(request, new URL(request.url));
+    if (!s || s.kind !== 'query' || s.multi || !['member', 'getMeasurements'].includes(s.name) || s.field !== 'member') return false;
+    const v = JSON.parse(request.postData || '{}').variables || {};
+    const id = s.name === 'member' ? v.id : v.target?.id;
+    const target = new URL(cfg.target).hash.match(/memberId=([a-fA-F0-9]{24})/)?.[1];
+    return typeof id === 'string' && /^[a-fA-F0-9]{24}$/.test(id) && !!target && id !== target;
+  } catch { return false; }
+}
 export function describeBlocked(request, type, cfg, code) {
   const out = {code, type: NAME.test(type || '') ? type : '?', method: NAME.test(request?.method || '') ? request.method : '?'};
   let u;
@@ -98,9 +112,11 @@ export async function renderReport(cfg, {windowId, onStage = () => {}} = {}) {
     if (source.tabId !== tabId) return;
     if (method === 'Fetch.requestPaused') {
       let decision = requestDecision(params.request, params.resourceType, cfg, printing);
-      if (decision.code === 'ORIGIN_BLOCKED' && sidebarMembersRead(params.request, params.resourceType, cfg)) {
+      const sidebar = decision.code === 'ORIGIN_BLOCKED' && sidebarMembersRead(params.request, params.resourceType, cfg);
+      const other = decision.code === 'ORIGIN_BLOCKED' && !sidebar && otherMemberRead(params.request, params.resourceType, cfg);
+      if (sidebar || other) {
         decision = {allow: false, code: null};
-        const seen = graphqlOperation(params.request, new URL(params.request.url));
+        const seen = graphqlOperation(params.request, new URL(params.request.url)) + (other ? ' 다른환자' : '');
         facts.ignored = facts.ignored || [];
         if (facts.ignored.length < 3 && !facts.ignored.includes(seen)) facts.ignored.push(seen);
       }
@@ -142,21 +158,22 @@ export async function renderReport(cfg, {windowId, onStage = () => {}} = {}) {
     await send('Fetch.enable', {patterns: [{urlPattern: '*', requestStage: 'Request'}]});
     // Extensions may not override the timezone; app.js refuses to start unless the PC runs KST.
     await send('Emulation.setFocusEmulationEnabled', {enabled: true}).catch(() => {});
-    // cfg.ui comes from detectUiVersion() at the start of the run: 'old' takes the legacy.js flow.
+    // cfg.ui comes from detectUiVersion() at the start of the run: 'old' takes the legacy.js selection flow.
+    // Provenance, capture and the print click are build-independent for both versions (anybuild.js).
     const legacy = cfg.ui === 'old';
     const expectHref = legacy ? legacyResultHref(cfg) : cfg.target;
-    const provenance = legacy ? legacyProvenanceExpression(cfg) : provenanceExpression(cfg);
-    await send('Page.addScriptToEvaluateOnNewDocument', {source: legacy ? legacyCaptureHook(cfg) : captureHook(cfg)});
+    const provenance = provenanceExpression(cfg);
+    await send('Page.addScriptToEvaluateOnNewDocument', {source: captureHook(cfg)});
     stage('NAVIGATE');
     const nav = await send('Page.navigate', {url: cfg.target});
     if (nav.errorText) throw fail('NAVIGATION_FAILED');
     stage('EXAM_SELECT');
-    await poll(legacy ? legacySelectExpression(cfg) : openReportExpression(cfg), 'SELECTION_FAILED');
+    await poll(legacy ? legacySelectExpression(cfg) : newSelectExpression(cfg), 'SELECTION_FAILED');
     if (await evaluate('location.href') !== expectHref) throw fail('AUTH_ENDED');
     stage('REPORT_PROVENANCE');
     await poll(provenance, 'PROVENANCE_FAILED');
     stage('PRINT_PREPARE');
-    const clickPrint = '(' + provenance + '&&' + (legacy ? legacyPrintExpression() : printReportExpression()) + ')';
+    const clickPrint = '(' + provenance + '&&' + printExpression() + ')';
     await poll(clickPrint, 'PRINT_NOT_FOUND');
     facts.printClicks = 1;
     stage('PRINT_CAPTURE');

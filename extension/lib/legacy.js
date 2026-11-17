@@ -1,13 +1,11 @@
 // Two iBalance UI versions exist in clinics (2026-11-16):
-//  - "new": the result page opens from `#/measurement-result?memberId=…` and is driven by report-src.js
-//    (generated from the downloader engine; not edited here).
+//  - "new": the result page opens from `#/measurement-result?memberId=…`; its selection is report-src.js
+//    (generated from the downloader engine) made build-independent in anybuild.js.
 //  - "old": the result page ignores the address. The user picks 측정결과 → patient → date row → 리포트 and the
 //    page shows a 종합 리포트 modal with 프린트/PACS/알림톡/닫기 buttons. Confirmed on a test install.
 // The version is decided once per run from the public main bundle (detectUiVersion). The old flow below uses
 // the page's own handlers and data (React props), not minified component names, so other old builds still work.
-// The report body (print iframe capture, `.sc-1ovj0ov-*`, print icon mask) is shared by both versions.
-import {installCapture} from './report-src.js';
-
+// The report body (print iframe capture, `.sc-1ovj0ov-*`, print icon mask) is shared by both versions (anybuild.js).
 const FETCH_TIMEOUT_MS = 15000;
 
 /** Decide the UI version from the clinic's public main bundle. Never sends credentials. */
@@ -132,54 +130,13 @@ function legacySelectExam(monthly) {
   return at(c ? 'page-click' : 'page-number-missing');
 }
 
-// Provenance of the open report: every report part must point at the wanted exam and patient.
-function legacyVerifyExam(monthly, doc) {
-  const roots = [...doc.querySelectorAll('.sc-1ovj0ov-0')];
-  if (roots.length !== 1) return false;
-  const root = roots[0], nodes = [root, ...root.querySelectorAll('*')];
-  if (nodes.length > 12000) return false;
-  const fiberOf = n => { const k = Object.keys(n).find(k => k.startsWith('__reactFiber$')); return k ? n[k] : null; };
-  let data = 0, patient = 0, modal = 0;
-  const seen = new Set();
-  for (const n of nodes) for (let f = fiberOf(n), i = 0; f && i < 48 && !seen.has(f); i++, f = f.return) {
-    seen.add(f);
-    const q = f.memoizedProps || {};
-    if (typeof q.onAfterPrint === 'function' && q.data && typeof q.data === 'object' && !Array.isArray(q.data)) { if (q.data.id !== monthly.measurementId) return false; data++; }
-    if (typeof q.onAfterPrint === 'function' && q.patient && typeof q.patient === 'object') { if (q.patient.id !== monthly.memberId) return false; patient++; }
-  }
-  // The modal component sits far above the report body; find it from the whole page.
-  const seenModal = new Set();
-  for (const n of doc.querySelectorAll('body *')) for (let f = fiberOf(n), i = 0; f && i < 4 && !seenModal.has(f); i++, f = f.return) {
-    seenModal.add(f);
-    const q = f.memoizedProps || {};
-    if (typeof q.onReportClose === 'function' && q.selectedMeasurement && typeof q.selectedMeasurement === 'object') { if (q.selectedMeasurement.id !== monthly.measurementId) return false; modal++; }
-  }
-  return data > 0 && patient > 0 && modal > 0;
-}
-
 // ---- expressions used by report.js ----
 
 export function legacySelectExpression(cfg) {
   return '(' + legacySelectExam.toString() + ')(' + JSON.stringify(cfg.monthly) + ')';
 }
-export function legacyProvenanceExpression(cfg) {
-  return '(' + legacyVerifyExam.toString() + ')(' + JSON.stringify(cfg.monthly) + ',document)';
-}
 /** Address of the old result page once 측정결과 is open (the old page drops the query string). */
 export function legacyResultHref(cfg) { return cfg.frontend + '#/measurement-result'; }
-/** Same capture hook as the new UI, with the old-UI provenance check run at print time. */
-export function legacyCaptureHook(cfg) {
-  return '(' + installCapture.toString() + ')(' + JSON.stringify(cfg.frontend) + ',' + JSON.stringify(cfg.tokens) + ',' + JSON.stringify(cfg.target) + ','
-    + JSON.stringify(cfg.monthly || null) + ',' + legacyVerifyExam.toString() + ');';
-}
-/** Click the single 프린트 icon of the shared report header (never PACS/알림톡) once the report is ready. */
-export function legacyPrintExpression() {
-  return `(()=>{
-  const root=document.querySelector('.sc-1ovj0ov-0');
-  if(!root||!root.querySelectorAll('.sc-1ovj0ov-1').length||document.fonts?.status==='loading'||[...root.querySelectorAll('img')].some(i=>!i.complete||!i.naturalWidth)||[...root.querySelectorAll('canvas')].some(c=>!c.width||!c.height))return false;
-  const icons=[...document.querySelectorAll('svg')].filter(s=>s.querySelector('mask[id="path-3-inside-1_913:1040"]'));if(!icons.length)return false;if(icons.length!==1)throw Error();
-  icons[0].dispatchEvent(new MouseEvent('click',{bubbles:true}));if(window.__ibReport)window.__ibReport.printClicks=(window.__ibReport.printClicks|0)+1;return true;
- })()`;
-}
+// Provenance, capture hook and print click are shared with the new UI: see anybuild.js.
 
-export {legacySelectExam, legacyVerifyExam};
+export {legacySelectExam};
